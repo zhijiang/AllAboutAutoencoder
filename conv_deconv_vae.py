@@ -410,7 +410,8 @@ for e in range(1000):
         return ((x + 1.) / 2.).transpose(1, 2, 0)
 
     if e % 10 == 0:
-        samples_path = os.path.join(os.path.split(__file__)[0], "sample_images")
+        samples_path = os.path.join(os.path.split(__file__)[0],
+                                    "sample_images_epoch_%d" % e)
         if not os.path.exists(samples_path):
             os.makedirs(samples_path)
 
@@ -423,14 +424,14 @@ for e in range(1000):
         img3 = color_grid_vis(samples,
                               transform=tf, show=False)
 
-        imsave(os.path.join(samples_path, '%d_source.png' % e), img1)
-        imsave(os.path.join(samples_path, '%d.png' % e), img2)
-        imsave(os.path.join(samples_path, '%d.png' % e), img3)
+        imsave(os.path.join(samples_path, 'source.png'), img1)
+        imsave(os.path.join(samples_path, 'recs.png'), img2)
+        imsave(os.path.join(samples_path, 'samples.png'), img3)
 
         paths = make_paths(n_code, 9)
         for i in range(paths.shape[1]):
             path_samples = _x_given_z(floatX(paths[:, i, :]))
             for j, sample in enumerate(path_samples):
                 imsave(os.path.join(
-                    samples_path,  '%d_paths_%d_%d.png' % (e, i, j)),
+                    samples_path,  'paths_%d_%d.png' % (i, j)),
                     tf(sample))
