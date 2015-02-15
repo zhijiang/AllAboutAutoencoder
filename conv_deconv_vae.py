@@ -7,10 +7,15 @@ Additionally converted to use default conv2d interface instead of explicit cuDNN
 """
 import theano
 import theano.tensor as T
+from theano.compat.python2x import OrderedDict
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
 from theano.tensor.signal.downsample import max_pool_2d
 from theano.tensor.nnet import conv2d
 import tarfile
+import tempfile
+import gzip
+import cPickle
+import fnmatch
 from time import time
 import numpy as np
 from matplotlib import pyplot as plt
@@ -147,11 +152,111 @@ def color_grid_vis(X, show=True, save=False, transform=False):
     return img
 
 
+def bw_grid_vis(X, show=True, save=False, transform=False):
+    ngrid = int(np.ceil(np.sqrt(len(X))))
+    npxs = np.sqrt(X[0].size)
+    img = np.zeros((npxs * ngrid + ngrid - 1,
+                    npxs * ngrid + ngrid - 1))
+    for i, x in enumerate(X):
+        j = i % ngrid
+        i = i / ngrid
+        if transform:
+            x = transform(x)
+        img[i*npxs+i:(i*npxs)+npxs+i, j*npxs+j:(j*npxs)+npxs+j] = x
+    if show:
+        plt.imshow(img, interpolation='nearest')
+        plt.show()
+    if save:
+        imsave(save, img)
+    return img
+
+
 def center_crop(img, n_pixels):
     img = img[n_pixels:img.shape[0] - n_pixels,
               n_pixels:img.shape[1] - n_pixels]
     return img
 
+
+def unpickle(f):
+    import cPickle
+    fo = open(f, 'rb')
+    d = cPickle.load(fo)
+    fo.close()
+    return d
+
+
+def cifar10(datasets_dir='/Tmp/kastner'):
+    try:
+        import urllib
+        urllib.urlretrieve('http://google.com')
+    except AttributeError:
+        import urllib.request as urllib
+    url = 'http://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz'
+    data_file = os.path.join(datasets_dir, 'cifar-10-python.tar.gz')
+    data_dir = os.path.join(datasets_dir, 'cifar-10-batches-py')
+    if not os.path.exists(data_dir):
+        urllib.urlretrieve(url, data_file)
+        tar = tarfile.open(data_file)
+        os.chdir(datasets_dir)
+        tar.extractall()
+        tar.close()
+
+    train_files = []
+    for filepath in fnmatch.filter(os.listdir(data_dir), 'data*'):
+        train_files.append(os.path.join(data_dir, filepath))
+
+    name2label = {k:v for v,k in enumerate(
+        unpickle(os.path.join(data_dir, 'batches.meta'))['label_names'])}
+    label2name = {v:k for k,v in name2label.items()}
+
+    train_files = sorted(train_files, key=lambda x: x.split("_")[-1])
+    train_x = []
+    train_y = []
+    for f in train_files:
+        d = unpickle(f)
+        train_x.append(d['data'])
+        train_y.append(d['labels'])
+    train_x = np.array(train_x)
+    shp = train_x.shape
+    train_x = train_x.reshape(shp[0] * shp[1], 3, 32, 32)
+    train_y = np.array(train_y)
+    train_y = train_y.ravel()
+    return (train_x, train_y)
+
+
+def mnist(datasets_dir='/Tmp/kastner'):
+    try:
+        import urllib
+        urllib.urlretrieve('http://google.com')
+    except AttributeError:
+        import urllib.request as urllib
+    url = 'http://www.iro.umontreal.ca/~lisa/deep/data/mnist/mnist.pkl.gz'
+    data_file = os.path.join(datasets_dir, 'mnist.pkl.gz')
+    if not os.path.exists(data_file):
+        urllib.urlretrieve(url, data_file)
+
+    print('... loading data')
+    # Load the dataset
+    f = gzip.open(data_file, 'rb')
+    try:
+        train_set, valid_set, test_set = cPickle.load(f, encoding="latin1")
+    except TypeError:
+        train_set, valid_set, test_set = cPickle.load(f)
+    f.close()
+
+    test_x, test_y = test_set
+    test_x = test_x.astype('float32')
+    test_x = test_x.astype('float32').reshape(test_x.shape[0], 1, 28, 28)
+    test_y = test_y.astype('int32')
+    valid_x, valid_y = valid_set
+    valid_x = valid_x.astype('float32')
+    valid_x = valid_x.astype('float32').reshape(valid_x.shape[0], 1, 28, 28)
+    valid_y = valid_y.astype('int32')
+    train_x, train_y = train_set
+    train_x = train_x.astype('float32').reshape(train_x.shape[0], 1, 28, 28)
+    train_y = train_y.astype('int32')
+    rval = [(train_x, train_y), (valid_x, valid_y), (test_x, test_y)]
+    return rval
 
 # wget http://vis-www.cs.umass.edu/lfw/lfw-deepfunneled.tgz
 def lfw(n_imgs=1000, flatten=True, npx=64, datasets_dir='/Tmp/kastner'):
@@ -220,7 +325,7 @@ def make_paths(n_code, n_paths, n_steps=480):
     return paths
 
 
-def Adam(params, cost, lr=0.0002, b1=0.1, b2=0.001, e=1e-8):
+def Adam(params, cost, lr=0.0001, b1=0.1, b2=0.001, e=1e-8):
     """
     no bias init correction
     """
@@ -238,12 +343,24 @@ def Adam(params, cost, lr=0.0002, b1=0.1, b2=0.001, e=1e-8):
         updates.append((p, p_t))
     return updates
 
-srng = RandomStreams()
+class PickleMixin(object):
+    def __getstate__(self):
+        if not hasattr(self, '_pickle_skip_list'):
+            self._pickle_skip_list = []
+            for k, v in self.__dict__.items():
+                try:
+                    f = tempfile.TemporaryFile()
+                    cPickle.dump(v, f)
+                except:
+                    self._pickle_skip_list.append(k)
+        state = OrderedDict()
+        for k, v in self.__dict__.items():
+            if k not in self._pickle_skip_list:
+                state[k] = v
+        return state
 
-trX, _, _, _ = lfw(n_imgs='all', flatten=False, npx=64)
-
-trX = floatX(trX)
-
+    def __setstate__(self, state):
+        self.__dict__ = state
 
 def log_prior(mu, log_sigma):
     """
@@ -307,132 +424,206 @@ def depool(X, factor=2):
 def deconv_and_depool(X, w, b=None, activation=rectify):
     return activation(deconv(depool(X), w, b))
 
-n_code = 512
-n_hidden = 2048
-n_batch = 128
 
-print('generating weights')
+class ConvVAE(PickleMixin):
+    def __init__(self):
+        self.srng = RandomStreams()
+        self.n_code = 512
+        self.n_hidden = 2048
+        self.n_batch = 128
+        self.costs_ = []
+        self.epoch_ = 0
+        snapshot_file = "mnist_snapshot.pkl"
+        if os.path.exists(snapshot_file):
+            print("Loading from saved snapshot " + snapshot_file)
+            f = open(snapshot_file, 'rb')
+            classifier = cPickle.load(f)
+            self.__setstate__(classifier.__dict__)
+            f.close()
 
-we = uniform((64, 3, 5, 5))
-w2e = uniform((128, 64, 5, 5))
-w3e = uniform((256, 128, 5, 5))
-w4e = uniform((256 * 8 * 8, n_hidden))
-b4e = shared0s(n_hidden)
-wmu = uniform((n_hidden, n_code))
-bmu = shared0s(n_code)
-wsigma = uniform((n_hidden, n_code))
-bsigma = shared0s(n_code)
+    def _setup_functions(self, trX):
+        l1_e = (64, trX.shape[1], 5, 5)
+        print("l1_e", l1_e)
+        l1_d = (l1_e[1], l1_e[0], l1_e[2], l1_e[3])
+        print("l1_d", l1_d)
+        l2_e = (128, l1_e[0], 5, 5)
+        print("l2_e", l2_e)
+        l2_d = (l2_e[1], l2_e[0], l2_e[2], l2_e[3])
+        print("l2_d", l2_d)
+        # 2 layers means downsample by 2 ** 2 -> 4, with input size 28x28 -> 7x7
+        # assume square
+        self.downpool_sz = trX.shape[-1] // 4
+        l3_e = (l2_e[0] * self.downpool_sz * self.downpool_sz,
+                self.n_hidden)
+        print("l3_e", l3_e)
+        l3_d = (l3_e[1], l3_e[0])
+        print("l4_d", l3_d)
 
-wd = uniform((n_code, n_hidden))
-bd = shared0s((n_hidden))
-w2d = uniform((n_hidden, 256 * 8 * 8))
-b2d = shared0s((256 * 8 * 8))
-w3d = uniform((128, 256, 5, 5))
-w4d = uniform((64, 128, 5, 5))
-wo = uniform((3, 64, 5, 5))
+        if not hasattr(self, "params"):
+            print('generating weights')
+            we = uniform(l1_e)
+            w2e = uniform(l2_e)
+            w3e = uniform(l3_e)
+            b3e = shared0s(self.n_hidden)
+            wmu = uniform((self.n_hidden, self.n_code))
+            bmu = shared0s(self.n_code)
+            wsigma = uniform((self.n_hidden, self.n_code))
+            bsigma = shared0s(self.n_code)
 
-enc_params = [we, w2e, w3e, w4e, b4e, wmu, bmu, wsigma, bsigma]
-dec_params = [wd, bd, w2d, b2d, w3d, w4d, wo]
-params = enc_params + dec_params
+            wd = uniform((self.n_code, self.n_hidden))
+            bd = shared0s((self.n_hidden))
+            w2d = uniform(l3_d)
+            b2d = shared0s((l3_d[1]))
+            w3d = uniform(l2_d)
+            wo = uniform(l1_d)
+            self.enc_params = [we, w2e, w3e, b3e, wmu, bmu, wsigma, bsigma]
+            self.dec_params = [wd, bd, w2d, b2d, w3d, wo]
+            self.params = self.enc_params + self.dec_params
 
+        print('theano code')
 
-def conv_gaussian_enc(X, w, w2, w3, w4, b4, wmu, bmu, wsigma, bsigma):
-    h = conv_and_pool(X, w)
-    h2 = conv_and_pool(h, w2)
-    h3 = conv_and_pool(h2, w3)
-    h3 = h3.reshape((h3.shape[0], -1))
-    h4 = T.tanh(T.dot(h3, w4) + b4)
-    mu = T.dot(h4, wmu) + bmu
-    log_sigma = 0.5 * (T.dot(h4, wsigma) + bsigma)
-    return mu, log_sigma
+        X = T.tensor4()
+        e = T.matrix()
+        Z_in = T.matrix()
 
+        code_mu, code_log_sigma, Z, y = self._model(X, e)
 
-def deconv_dec(X, w, b, w2, b2, w3, w4, wo):
-    h = rectify(T.dot(X, w) + b)
-    h2 = rectify(T.dot(h, w2) + b2)
-    h2 = h2.reshape((h2.shape[0], 256, 8, 8))
-    h3 = deconv_and_depool(h2, w3)
-    h4 = deconv_and_depool(h3, w4)
-    y = deconv_and_depool(h4, wo, activation=hard_tanh)
-    return y
+        y_out = self._deconv_dec(Z_in, *self.dec_params)
 
+        rec_cost = T.sum(T.abs_(X - y))
+        prior_cost = log_prior(code_mu, code_log_sigma)
 
-def model(X, e):
-    code_mu, code_log_sigma = conv_gaussian_enc(X, *enc_params)
-    Z = code_mu + T.exp(code_log_sigma) * e
-    y = deconv_dec(Z, *dec_params)
-    return code_mu, code_log_sigma, Z, y
+        cost = rec_cost - prior_cost
 
-print('theano code')
+        print('getting updates')
 
-X = T.tensor4()
-e = T.matrix()
-Z_in = T.matrix()
+        updates = Adam(self.params, cost)
 
-code_mu, code_log_sigma, Z, y = model(X, e)
+        print('compiling')
+        self._fit_function = theano.function([X, e], cost, updates=updates)
+        self._reconstruct = theano.function([X, e], y)
+        self._x_given_z = theano.function([Z_in], y_out)
+        self._z_given_x = theano.function([X, e], Z)
 
-y_out = deconv_dec(Z_in, *dec_params)
+    def _conv_gaussian_enc(self, X, w, w2, w3, b3, wmu, bmu, wsigma, bsigma):
+        h = conv_and_pool(X, w)
+        h2 = conv_and_pool(h, w2)
+        h2 = h2.reshape((h2.shape[0], -1))
+        h3 = T.tanh(T.dot(h2, w3) + b3)
+        mu = T.dot(h3, wmu) + bmu
+        log_sigma = 0.5 * (T.dot(h3, wsigma) + bsigma)
+        return mu, log_sigma
 
-rec_cost = T.sum(T.abs_(X - y))
-prior_cost = log_prior(code_mu, code_log_sigma)
+    def _deconv_dec(self, X, w, b, w2, b2, w3, wo):
+        h = rectify(T.dot(X, w) + b)
+        h2 = rectify(T.dot(h, w2) + b2)
+        #h2 = h2.reshape((h2.shape[0], 256, 8, 8))
+        # Referencing things outside function scope... will have to be class
+        # variable
+        h2 = h2.reshape((h2.shape[0], w3.shape[1], self.downpool_sz,
+                        self.downpool_sz))
+        h3 = deconv_and_depool(h2, w3)
+        y = deconv_and_depool(h3, wo, activation=hard_tanh)
+        return y
 
-cost = rec_cost - prior_cost
+    def _model(self, X, e):
+        code_mu, code_log_sigma = self._conv_gaussian_enc(X, *self.enc_params)
+        Z = code_mu + T.exp(code_log_sigma) * e
+        y = self._deconv_dec(Z, *self.dec_params)
+        return code_mu, code_log_sigma, Z, y
 
-print('getting updates')
+    def fit(self, trX):
+        if not hasattr(self, "_fit_function"):
+            self._setup_functions(trX)
 
-updates = Adam(params, cost)
+        xs = floatX(np.random.randn(100, self.n_code))
+        print('TRAINING')
+        x_rec = floatX(shuffle(trX)[:100])
+        t = time()
+        n = 0.
+        epochs = 1000
+        for e in range(epochs):
+            for xmb in iter_data(trX, size=self.n_batch):
+                xmb = floatX(xmb)
+                cost = self._fit_function(xmb, floatX(
+                    np.random.randn(xmb.shape[0], self.n_code)))
+                self.costs_.append(cost)
+                n += xmb.shape[0]
+            print("Train iter", e)
+            print("Total iters run", self.epoch_)
+            print("Cost", cost)
+            print("Mean cost", np.mean(self.costs_))
+            print("Time", n / (time() - t))
+            self.epoch_ += 1
 
-print('compiling')
+            def tf(x):
+                return ((x + 1.) / 2.).transpose(1, 2, 0)
 
-_train = theano.function([X, e], cost, updates=updates)
-_reconstruct = theano.function([X, e], y)
-_x_given_z = theano.function([Z_in], y_out)
-_z_given_x = theano.function([X, e], Z)
+            if e % 5 == 0:
+                print("Saving model snapshot")
+                snapshot_file = "mnist_snapshot.pkl"
+                f = open(snapshot_file, 'wb')
+                cPickle.dump(self, f, protocol=2)
+                f.close()
 
-xs = floatX(np.random.randn(100, n_code))
+            if e == epochs or e % 100 == 0:
+                samples_path = os.path.join(os.path.split(__file__)[0],
+                                            "sample_images_epoch_%d" % e)
+                if not os.path.exists(samples_path):
+                    os.makedirs(samples_path)
 
-print('TRAINING')
+                samples = self._x_given_z(xs)
+                recs = self._reconstruct(x_rec, floatX(
+                    np.ones((x_rec.shape[0], self.n_code))))
+                if trX.shape[1] == 3:
+                    img1 = color_grid_vis(x_rec,
+                                        transform=tf, show=False)
+                    img2 = color_grid_vis(recs,
+                                        transform=tf, show=False)
+                    img3 = color_grid_vis(samples,
+                                        transform=tf, show=False)
+                elif trX.shape[1] == 1:
+                    img1 = bw_grid_vis(x_rec, show=False)
+                    img2 = bw_grid_vis(recs, show=False)
+                    img3 = bw_grid_vis(samples, show=False)
 
-x_rec = floatX(shuffle(trX)[:100])
+                imsave(os.path.join(samples_path, 'source.png'), img1)
+                imsave(os.path.join(samples_path, 'recs.png'), img2)
+                imsave(os.path.join(samples_path, 'samples.png'), img3)
 
-t = time()
-n = 0.
-n_epochs = 1000
-for e in range(n_epochs):
-    costs = []
-    for xmb in iter_data(trX, size=n_batch):
-        xmb = floatX(xmb)
-        cost = _train(xmb, floatX(np.random.randn(xmb.shape[0], n_code)))
-        costs.append(cost)
-        n += xmb.shape[0]
-    print(e, np.mean(costs), n / (time() - t))
+                paths = make_paths(self.n_code, 3)
+                for i in range(paths.shape[1]):
+                    path_samples = self._x_given_z(floatX(paths[:, i, :]))
+                    for j, sample in enumerate(path_samples):
+                        if trX.shape[1] == 3:
+                            imsave(os.path.join(
+                                samples_path, 'paths_%d_%d.png' % (i, j)),
+                                tf(sample))
+                        else:
+                            imsave(os.path.join(samples_path,
+                                                'paths_%d_%d.png' % (i, j)),
+                                sample.squeeze())
 
-    def tf(x):
-        return ((x + 1.) / 2.).transpose(1, 2, 0)
+    def transform(self, x_rec):
+                recs = self._reconstruct(x_rec, floatX(
+                    np.ones((x_rec.shape[0], self.n_code))))
+                return recs
 
-    if e == n_epochs or e % 100 == 0:
-        samples_path = os.path.join(os.path.split(__file__)[0],
-                                    "sample_images_epoch_%d" % e)
-        if not os.path.exists(samples_path):
-            os.makedirs(samples_path)
+    def encode(self, X, e=None):
+        if e is None:
+            e = np.ones((X.shape[0], self.n_code))
+        return self._z_given_x(X, e)
 
-        samples = _x_given_z(xs)
-        recs = _reconstruct(x_rec, floatX(np.ones((x_rec.shape[0], n_code))))
-        img1 = color_grid_vis(x_rec,
-                              transform=tf, show=False)
-        img2 = color_grid_vis(recs,
-                              transform=tf, show=False)
-        img3 = color_grid_vis(samples,
-                              transform=tf, show=False)
+    def decode(self, Z):
+        return self._z_given_x(Z)
 
-        imsave(os.path.join(samples_path, 'source.png'), img1)
-        imsave(os.path.join(samples_path, 'recs.png'), img2)
-        imsave(os.path.join(samples_path, 'samples.png'), img3)
-
-        paths = make_paths(n_code, 9)
-        for i in range(paths.shape[1]):
-            path_samples = _x_given_z(floatX(paths[:, i, :]))
-            for j, sample in enumerate(path_samples):
-                imsave(os.path.join(
-                    samples_path,  'paths_%d_%d.png' % (i, j)),
-                    tf(sample))
+if __name__ == "__main__":
+    # lfw is (9164, 3, 64, 64)
+    #trX, _, _, _ = lfw(n_imgs='all', flatten=False, npx=64)
+    #trX, trY = cifar10()
+    tr, _, _, = mnist()
+    trX, trY = tr
+    trX = floatX(trX)
+    tf = ConvVAE()
+    tf.fit(trX)
+    recs = tf.transform(trX[:100])
