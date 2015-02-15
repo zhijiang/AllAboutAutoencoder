@@ -397,7 +397,8 @@ x_rec = floatX(shuffle(trX)[:100])
 
 t = time()
 n = 0.
-for e in range(1000):
+n_epochs = 1000
+for e in range(n_epochs):
     costs = []
     for xmb in iter_data(trX, size=n_batch):
         xmb = floatX(xmb)
@@ -409,7 +410,7 @@ for e in range(1000):
     def tf(x):
         return ((x + 1.) / 2.).transpose(1, 2, 0)
 
-    if e % 10 == 0:
+    if e == n_epochs or e % 100 == 0:
         samples_path = os.path.join(os.path.split(__file__)[0],
                                     "sample_images_epoch_%d" % e)
         if not os.path.exists(samples_path):
