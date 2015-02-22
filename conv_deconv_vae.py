@@ -21,7 +21,8 @@ import numpy as np
 from matplotlib import pyplot as plt
 from scipy.misc import imsave, imread
 import os
-
+from sklearn.base import BaseEstimator, TransformerMixin
+from scipy.linalg import svd
 from skimage.transform import resize
 
 
@@ -425,18 +426,49 @@ def deconv_and_depool(X, w, b=None, activation=rectify):
     return activation(deconv(depool(X), w, b))
 
 
+class ZCA(BaseEstimator, TransformerMixin):
+    def __init__(self, n_components=None, bias=.1, scale_by=1., copy=True):
+        self.n_components = n_components
+        self.bias = bias
+        self.copy = copy
+        self.scale_by = float(scale_by)
+
+    def fit(self, X, y=None):
+        if self.copy:
+            X = np.array(X, copy=self.copy)
+            X = np.copy(X)
+        X /= self.scale_by
+        n_samples, n_features = X.shape
+        self.mean_ = np.mean(X, axis=0)
+        X -= self.mean_
+        U, S, VT = svd(np.dot(X.T, X) / n_samples, full_matrices=False)
+        components = np.dot(VT.T * np.sqrt(1.0 / (S + self.bias)), VT)
+        self.covar_ = np.dot(X.T, X)
+        self.components_ = components[:self.n_components]
+        return self
+
+    def transform(self, X):
+        if self.copy:
+            X = np.array(X, copy=self.copy)
+            X = np.copy(X)
+        X /= self.scale_by
+        X -= self.mean_
+        X_transformed = np.dot(X, self.components_.T)
+        return X_transformed
+
 class ConvVAE(PickleMixin):
-    def __init__(self):
+    def __init__(self, image_save_root=None, snapshot_file="snapshot.pkl"):
         self.srng = RandomStreams()
         self.n_code = 512
         self.n_hidden = 2048
         self.n_batch = 128
         self.costs_ = []
         self.epoch_ = 0
-        snapshot_file = "mnist_snapshot.pkl"
-        if os.path.exists(snapshot_file):
-            print("Loading from saved snapshot " + snapshot_file)
-            f = open(snapshot_file, 'rb')
+        self.snapshot_file = snapshot_file
+        self.image_save_root = image_save_root
+        if os.path.exists(self.snapshot_file):
+            print("Loading from saved snapshot " + self.snapshot_file)
+            f = open(self.snapshot_file, 'rb')
             classifier = cPickle.load(f)
             self.__setstate__(classifier.__dict__)
             f.close()
@@ -490,7 +522,8 @@ class ConvVAE(PickleMixin):
 
         y_out = self._deconv_dec(Z_in, *self.dec_params)
 
-        rec_cost = T.sum(T.abs_(X - y))
+        #rec_cost = T.sum(T.abs_(X - y))
+        rec_cost = T.sum(T.sqr(X - y)) # / T.cast(X.shape[0], 'float32')
         prior_cost = log_prior(code_mu, code_log_sigma)
 
         cost = rec_cost - prior_cost
@@ -503,7 +536,7 @@ class ConvVAE(PickleMixin):
         self._fit_function = theano.function([X, e], cost, updates=updates)
         self._reconstruct = theano.function([X, e], y)
         self._x_given_z = theano.function([Z_in], y_out)
-        self._z_given_x = theano.function([X, e], Z)
+        self._z_given_x = theano.function([X], (code_mu, code_log_sigma))
 
     def _conv_gaussian_enc(self, X, w, w2, w3, b3, wmu, bmu, wsigma, bsigma):
         h = conv_and_pool(X, w)
@@ -556,19 +589,22 @@ class ConvVAE(PickleMixin):
             print("Time", n / (time() - t))
             self.epoch_ += 1
 
-            def tf(x):
-                return ((x + 1.) / 2.).transpose(1, 2, 0)
-
             if e % 5 == 0:
                 print("Saving model snapshot")
-                snapshot_file = "mnist_snapshot.pkl"
-                f = open(snapshot_file, 'wb')
+                f = open(self.snapshot_file, 'wb')
                 cPickle.dump(self, f, protocol=2)
                 f.close()
 
+            def tf(x):
+                return ((x + 1.) / 2.).transpose(1, 2, 0)
+
             if e == epochs or e % 100 == 0:
-                samples_path = os.path.join(os.path.split(__file__)[0],
-                                            "sample_images_epoch_%d" % e)
+                if self.image_save_root is None:
+                    image_save_root = os.path.split(__file__)[0]
+                else:
+                    image_save_root = self.image_save_root
+                samples_path = os.path.join(
+                    image_save_root, "sample_images_epoch_%d" % self.epoch_)
                 if not os.path.exists(samples_path):
                     os.makedirs(samples_path)
 
@@ -619,11 +655,23 @@ class ConvVAE(PickleMixin):
 
 if __name__ == "__main__":
     # lfw is (9164, 3, 64, 64)
-    #trX, _, _, _ = lfw(n_imgs='all', flatten=False, npx=64)
+    #trX, _, _, _ = lfw(n_imgs='all', flatten=False, npx=32)
+    #tf = ConvVAE(snapshot_file="lfw_snapshot.pkl")
+    #trX = floatX(trX)
+
     #trX, trY = cifar10()
+    #tf = ConvVAE(snapshot_file="cifar_snapshot.pkl")
+    #zca = ZCA()
+    #old_shape = trX.shape
+    #trX = zca.fit_transform(trX.reshape(len(trX), -1))
+    #trX = trX.reshape(old_shape)
+    #trX = floatX(trX)
+
     tr, _, _, = mnist()
     trX, trY = tr
+    tf = ConvVAE(image_save_root="/Tmp/kastner",
+                 snapshot_file="/Tmp/kastner/mnist_snapshot.pkl")
     trX = floatX(trX)
-    tf = ConvVAE()
+
     tf.fit(trX)
     recs = tf.transform(trX[:100])
